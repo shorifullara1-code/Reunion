@@ -41,6 +41,8 @@ export default function AppWrapper() {
   );
 }
 
+import { supabase } from './lib/supabase';
+
 function App() {
   const [alumni, setAlumni] = useState<Alumnus[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser>(null);
@@ -53,40 +55,45 @@ function App() {
   const location = useLocation();
 
   useEffect(() => {
-    const stored = localStorage.getItem('slc_alumni');
-    if (stored) {
-      try {
-        setAlumni(JSON.parse(stored));
-      } catch (e) {
-        console.error('Failed to parse alumni data');
+    const fetchData = async () => {
+      // Fetch Alumni
+      const { data: alumniData, error: alumniError } = await supabase.from('alumni').select('*');
+      if (alumniData) {
+        setAlumni(alumniData);
+      } else if (alumniError) {
+        console.error('Failed to fetch alumni data from Supabase', alumniError);
       }
-    }
-    
-    const storedImages = localStorage.getItem('slc_hero_images');
-    if (storedImages) {
-      try {
-        setHeroImages(JSON.parse(storedImages));
-      } catch (e) {
-        console.error('Failed to parse hero images');
+
+      // Fetch Hero Images
+      const { data: settingsData, error: settingsError } = await supabase.from('settings').select('value').eq('key', 'hero_images').single();
+      if (settingsData && settingsData.value) {
+        setHeroImages(settingsData.value);
+      } else if (settingsError) {
+        console.error('Failed to fetch hero images from Supabase', settingsError);
       }
-    }
+    };
+
+    fetchData();
   }, []);
 
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [location.pathname]);
 
-  const saveAlumni = (data: Alumnus[]) => {
+  const saveAlumni = async (data: Alumnus[]) => {
     setAlumni(data);
-    localStorage.setItem('slc_alumni', JSON.stringify(data));
+    // Upsert all data to Supabase
+    const { error } = await supabase.from('alumni').upsert(data);
+    if (error) console.error('Error saving alumni to Supabase:', error);
   };
 
-  const saveHeroImages = (images: string[]) => {
+  const saveHeroImages = async (images: string[]) => {
     setHeroImages(images);
-    localStorage.setItem('slc_hero_images', JSON.stringify(images));
+    const { error } = await supabase.from('settings').upsert({ key: 'hero_images', value: images });
+    if (error) console.error('Error saving hero images to Supabase:', error);
   };
 
-  const handleRegister = (data: Omit<Alumnus, 'id' | 'timestamp' | 'status'>) => {
+  const handleRegister = async (data: Omit<Alumnus, 'id' | 'timestamp' | 'status'>) => {
     // Check if username exists
     if (alumni.some(a => a.username === data.username)) {
       alert('Username already exists. Please choose another.');
@@ -95,12 +102,22 @@ function App() {
 
     const newAlumnus: Alumnus = {
       ...data,
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID(),
       status: 'pending',
-      timestamp: Date.now(),
+      timestamp: new Date().toISOString(),
+      passwordResetRequest: false
     };
     
-    saveAlumni([newAlumnus, ...alumni]);
+    const newAlumniList = [newAlumnus, ...alumni];
+    setAlumni(newAlumniList);
+    
+    const { error } = await supabase.from('alumni').insert([newAlumnus]);
+    if (error) {
+      console.error('Error registering alumnus:', error);
+      alert('Registration failed. Please try again.');
+      return false;
+    }
+
     setCurrentUser({ type: 'user', id: newAlumnus.id });
     navigate('/dashboard');
     return true;
@@ -1155,10 +1172,19 @@ function AdminDashboard({ alumni, saveAlumni, heroImages, saveHeroImages }: any)
     saveAlumni(updated);
   };
 
-  const handleReject = (id: string) => {
+  const handleReject = async (id: string) => {
     if(confirm('Are you sure you want to reject and delete this registration?')) {
-      const updated = alumni.filter((a: Alumnus) => a.id !== id);
-      saveAlumni(updated);
+      const { error } = await supabase.from('alumni').delete().eq('id', id);
+      if (error) {
+        console.error('Error deleting alumnus:', error);
+        alert('Failed to delete registration.');
+      } else {
+        const updated = alumni.filter((a: Alumnus) => a.id !== id);
+        // We only update local state here because delete is already done on Supabase.
+        // If we call saveAlumni, it will try to upsert the remaining, which is fine but redundant.
+        // However, to keep it simple and consistent with the prop, we can just call saveAlumni.
+        saveAlumni(updated);
+      }
     }
   };
 
